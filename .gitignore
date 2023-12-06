@@ -1,3 +1,7 @@
 tmp/**
 log/**
 **/*.pyc
+venv**
+.venv**
+samples/**
+dev_**.py
