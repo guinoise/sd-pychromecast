@@ -24,6 +24,8 @@ from enum import Enum
 from dataclasses import dataclass
 import torchvision.transforms as transforms
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL.Image import Image as ImagePIL
+from PIL.ImageDraw import ImageDraw as ImageDrawPIL
 from torch import Tensor
 # class PyChromeCastScript(scripts.Scripts):
 #     pass
@@ -69,7 +71,7 @@ class CastingImageInfo():
         lines = int(ceil(number_of_items / columns))
         return (columns, lines)
 
-    def add_text_to_im(self, im: Image.Image, text: Optional[str], date: Optional[datetime]= None) -> Image.Image:
+    def add_text_to_im(self, im: ImagePIL, text: Optional[str], date: Optional[datetime]= None) -> ImagePIL:
         if text is None and date is None:
             return
         elif text is None:
@@ -80,7 +82,7 @@ class CastingImageInfo():
         zone= int(h*0.05)
         logger.debug("Add text. w %4d h %4d zone %4d : %s", w, h, zone, text)
         im2= ImageOps.expand(im, border=(0,zone,0,0))
-        draw: ImageDraw.ImageDraw= ImageDraw.Draw(im2)
+        draw: ImageDrawPIL= ImageDraw.Draw(im2)
         #font= ImageFont.truetype('FreeMono.ttf', 24)
         draw.text((5,5), text, fill=(0,0,0))
         return im2
@@ -90,25 +92,25 @@ class CastingImageInfo():
         self.config= config
         self._ready= False
         try:
-            im: Image.Image= None
+            im: ImagePIL= None
             if self.image_info.image_type == ImageType.TENSOR:
                 prefix='torch_to_pil_'
                 obj: Tensor= self.image_info.obj
                 im= self._tensor_to_pil(obj)
             elif self.image_info.image_type == ImageType.FILE:
                 prefix='from_file_'
-                im: Image.Image= Image.open(self.image_info.obj)
+                im: ImagePIL= Image.open(self.image_info.obj)
             elif self.image_info.image_type == ImageType.PIL:
                 prefix='from_pil_'
-                im: Image.Image= self.image_info.obj
+                im: ImagePIL= self.image_info.obj
             elif self.image_info.image_type == ImageType.STABLE_DIFFUSION_PROCESSED:
                 prefix='sd_processed_'
                 obj: Processed= self.image_info.obj
-                im: Image.Image= self._join_images(obj.images)
+                im: ImagePIL= self._join_images(obj.images)
             elif self.image_info.image_type == ImageType.STABLE_DIFFUSION_PROCESSING:
                 prefix='sd_processing_'
                 obj: StableDiffusionProcessing= self.image_info.obj
-                im: Image.Image= self._join_images()
+                im: ImagePIL= self._join_images()
 
             im= self.add_text_to_im(im, image_info.message, image_info.creation_date)
             self._file= tempfile.NamedTemporaryFile(suffix='.png', prefix=prefix, dir=self.config.temp_dir, delete=False)
@@ -121,7 +123,7 @@ class CastingImageInfo():
         except Exception as e:
             logger.exception("Error processing image : %s", str(e))
             
-    def _join_images(self, images: List[Image.Image]):
+    def _join_images(self, images: List[ImagePIL]):
         count= len(images)
 
         if count == 1:
@@ -139,25 +141,25 @@ class CastingImageInfo():
         grid_h= max_h * rows
         grid = Image.new('RGB', size=(grid_w, grid_h))
 
-        im: Image.Image
+        im: ImagePIL
         for i, im in enumerate(images):
             grid.paste(im, box=(i%cols*max_w, i//cols*max_h))
         return grid
         
-    def _tensor_to_pil(self, obj: Tensor) -> Image.Image:
+    def _tensor_to_pil(self, obj: Tensor) -> ImagePIL:
         dimensions= len(obj.size())
         batch_size= 1
         if dimensions == 4:
             batch_size= len(obj)
         logger.info("Convert Tensor to PIL. Tensor has %d dimensions. Batch size %d", dimensions, batch_size)
         if dimensions < 4:
-            im: Image.Image= CastingImageInfo._torch_to_pil(obj)
+            im: ImagePIL= CastingImageInfo._torch_to_pil(obj)
             return im
         
         rows, cols= CastingImageInfo._get_grid_size(batch_size)       
-        images: List[Image.Image]= []
+        images: List[ImagePIL]= []
         for i in range(batch_size):
-            im: Image.Image= CastingImageInfo._torch_to_pil(obj[i])
+            im: ImagePIL= CastingImageInfo._torch_to_pil(obj[i])
             images.append(im)
             
         return self._join_images(images=images)
