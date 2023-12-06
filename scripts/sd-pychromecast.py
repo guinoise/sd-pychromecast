@@ -1,3 +1,4 @@
+from matplotlib import font_manager
 from math import ceil, sqrt
 import gradio as gr
 import pychromecast
@@ -27,8 +28,13 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from PIL.Image import Image as ImagePIL
 from PIL.ImageDraw import ImageDraw as ImageDrawPIL
 from torch import Tensor
-# class PyChromeCastScript(scripts.Scripts):
-#     pass
+from textwrap import TextWrapper
+import itertools
+from PIL.ImageFont import FreeTypeFont
+
+class TvAspects(Enum):
+    ASPECT_4_3= (4,3)
+    ASPECT_16_9= (16,9)
 
 class ImageType(Enum):
     FILE= "File"
@@ -55,6 +61,17 @@ class ImageInfo:
     creation_date: datetime
     message: Optional[str]
 
+def aspect_resize(w: int, h: int, aspect: TvAspects) -> Tuple[int,int]:
+    target_ratio= aspect.value[0] / aspect.value[1]
+    current_ratio= w / h
+    if current_ratio < target_ratio:
+        new_w = w * (target_ratio/current_ratio)
+        new_h = h
+    else:
+        new_w = w 
+        new_h = h * (target_ratio/current_ratio)
+    logger.debug("Aspect resize : ratio %d/%d %7.5f w: %5d %5d h: %5d %5d final ratio %7.5f", aspect.value[0], aspect.value[1],target_ratio, w, h, new_w, new_h, new_w/new_h)
+    return (new_w, new_h)
 
 class CastingImageInfo():
     image_info: ImageInfo
@@ -71,26 +88,12 @@ class CastingImageInfo():
         lines = int(ceil(number_of_items / columns))
         return (columns, lines)
 
-    def add_text_to_im(self, im: ImagePIL, text: Optional[str], date: Optional[datetime]= None) -> ImagePIL:
-        if text is None and date is None:
-            return
-        elif text is None:
-            text=date.strftime('%Y-%m-%d %H:%M:%S')
-        elif date is not None:
-            text="{} : {}".format(date.strftime('%Y-%m-%d %H:%M:%S'), text)
-        w,h= im.size
-        zone= int(h*0.05)
-        logger.debug("Add text. w %4d h %4d zone %4d : %s", w, h, zone, text)
-        im2= ImageOps.expand(im, border=(0,zone,0,0))
-        draw: ImageDrawPIL= ImageDraw.Draw(im2)
-        #font= ImageFont.truetype('FreeMono.ttf', 24)
-        draw.text((5,5), text, fill=(0,0,0))
-        return im2
-    
+  
     def __init__(self, image_info: ImageInfo, config: CastConfiguration):
         self.image_info= image_info
         self.config= config
         self._ready= False
+        self.aspect= TvAspects.ASPECT_16_9
         try:
             im: ImagePIL= None
             if self.image_info.image_type == ImageType.TENSOR:
@@ -111,6 +114,21 @@ class CastingImageInfo():
                 prefix='sd_processing_'
                 obj: StableDiffusionProcessing= self.image_info.obj
                 im: ImagePIL= self._join_images()
+            if image_info.message is None:
+                text= []
+            elif issubclass(type(image_info.message), str):
+                text= [image_info.message]
+            else:
+                text= image_info.message
+            
+            text_padding= "_" * 22
+            if im.info is not None:
+                v: str
+                for k,v in im.info.items():
+                    lines= v.splitlines()
+                    text.append(f"{k:20s} : {lines[0]}")
+                    for i in range(1,len(lines)):
+                        text.append(f"{text_padding} {lines[i]}")
 
             im= self.add_text_to_im(im, image_info.message, image_info.creation_date)
             self._file= tempfile.NamedTemporaryFile(suffix='.png', prefix=prefix, dir=self.config.temp_dir, delete=False)
@@ -122,6 +140,70 @@ class CastingImageInfo():
 
         except Exception as e:
             logger.exception("Error processing image : %s", str(e))
+
+    def add_text_to_im(self, im: ImagePIL, text: Union[str, List[str], None], date: datetime) -> ImagePIL:
+        td= datetime.now().replace(microsecond=0) - date.replace(microsecond=0)
+        date_text= "{} ({})".format(date.strftime('%Y-%m-%d %H:%M:%S'), td)
+        if text is None:
+            text= date_text
+        if issubclass(type(text), str):
+            text= [date_text, text]
+        else:
+            text.insert(0, date_text)
+
+        w,h= im.size
+        logger.debug("SIZE %20s w %5d h %5d", "orig", w, h)
+
+        wrapper: TextWrapper= TextWrapper()
+        font_size= int(h*0.03)
+        try:
+            font: FreeTypeFont= ImageFont.truetype(selected_font, size=font_size)
+            font_w= font.getlength("_")
+        except Exception as e:
+            logger.warning("Error loading TTF font, fallback to default.")
+            font: ImageFont= ImageFont.load_default(size=font_size)
+            # Approximation
+            font_w= int(font_size * 0.4)
+        logger.debug("SIZE %20s w %5d h %5d", "font", font_w, font_size)
+        r_w, r_h= aspect_resize(w + font_size * (len(text) + 2 ), h, self.aspect)
+        logger.debug("SIZE %20s w %5d h %5d", "aspect1", r_w, r_h)
+
+        max_char= int(r_w / font_w)
+        logger.debug("Font size : %5d max_char %d", font_size, max_char)
+
+        wrapper.width= int(r_w / font_w)
+        lines = [wrapper.wrap(i) for i in text]
+        lines = list(itertools.chain.from_iterable(lines))
+
+        r_h= int(h + ((len(lines)+1) * (font_size + 3)))
+        r_w= int(self.aspect.value[0]/self.aspect.value[1]*r_h)
+        lr_borders= int((r_w - w) / 2)
+        b_border= r_h - h
+        # Redo text wrapping after image resizing
+        max_char= int(r_w / font_w)
+        logger.debug("Font size : %5d max_char %d", font_size, max_char)
+
+        wrapper.width= int(r_w / font_w)
+        lines = [wrapper.wrap(i) for i in text]
+        lines = list(itertools.chain.from_iterable(lines))
+
+        logger.debug("SIZE %20s w %5d h %5d", "aspect2", r_w, r_h)
+        logger.debug("Add text. w %4d h %4d font size : %d nb lines %d", w, h, font_size, len(lines))
+        # left top right bottom
+        im2= ImageOps.expand(im, border=(lr_borders, 0, lr_borders, b_border))
+        draw: ImageDrawPIL= ImageDraw.Draw(im2)
+
+        #font= ImageFont.truetype('FreeMono.ttf', 24)
+        font= ImageFont.load_default(size=font_size)
+        y= h + 2
+        draw.rectangle([
+            (2, y), 
+            (r_w - 2, y + 2 + (len(lines) * (font_size+3)))
+            ], outline=(255,255,255), width=1)
+        for text in lines:
+            draw.text((3,y), text, fill=(255,255,255), font=font)
+            y+= font_size + 3
+        return im2
             
     def _join_images(self, images: List[ImagePIL]):
         count= len(images)
@@ -276,7 +358,21 @@ class PyChromeCastScript(scripts.Script):
             image_queue.put_nowait(img_info)
         except Full:
             logger.warning("Error queueing image, queue full")            
-        
+
+prefered_font=["FreeMono", "Ubuntu Mono"]
+all_fonts= font_manager.get_font_names()
+selected_font= None
+for f in prefered_font:
+    if f in all_fonts:
+        selected_font= f
+        break
+else:
+    for f in all_fonts:
+        if "Mono" in f:
+            selected_font= f
+            break
+    else:
+        selected_font= all_fonts[0]
     
 image_queue: Optional[Queue[ImageInfo]]= None
 cast_thread: Optional[CastThread]= None
