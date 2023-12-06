@@ -186,7 +186,7 @@ base_dir: pathlib.Path= pathlib.Path(scripts.basedir())
 log_dir = base_dir.joinpath("log")
 if not log_dir.exists():
     print ("Creating log directory %s" % log_dir.resolve())
-    log_dir.mkdir(parent=True)
+    log_dir.mkdir(parents=True)
 
 log_file= log_dir.joinpath("sd-pychromecast.log")
 #print("Log file for sd-pychromecast: %s" % log_file.resolve())
