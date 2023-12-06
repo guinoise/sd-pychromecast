@@ -1,11 +1,12 @@
 from math import ceil, sqrt
+import gradio as gr
 import pychromecast
 import time
 from datetime import datetime
 from modules import script_callbacks, shared, scripts, ui_components
 from modules.script_callbacks import ImageSaveParams, AfterCFGCallbackParams, ImageGridLoopParams
 import logging
-from modules.processing import StableDiffusionProcessingTxt2Img
+from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessing, Processed
 import pathlib
 import tempfile
 import socket
@@ -22,7 +23,7 @@ import modules.scripts as scripts
 from enum import Enum
 from dataclasses import dataclass
 import torchvision.transforms as transforms
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from torch import Tensor
 # class PyChromeCastScript(scripts.Scripts):
 #     pass
@@ -31,6 +32,8 @@ class ImageType(Enum):
     FILE= "File"
     TENSOR= "torch Tensor"
     PIL= "Pillow Image"
+    STABLE_DIFFUSION_PROCESSED= "Stable diffusion processed"
+    STABLE_DIFFUSION_PROCESSING= "Stable diffusion processing"
     
 class CastType(Enum):
     CHROMECAST= "ChromeCast"
@@ -65,36 +68,82 @@ class CastingImageInfo():
         columns = int(sqrt(number_of_items))
         lines = int(ceil(number_of_items / columns))
         return (columns, lines)
-        
+
+    def add_text_to_im(self, im: Image.Image, text: Optional[str], date: Optional[datetime]= None) -> Image.Image:
+        if text is None and date is None:
+            return
+        elif text is None:
+            text=date.strftime('%Y-%m-%d %H:%M:%S')
+        elif date is not None:
+            text="{} : {}".format(date.strftime('%Y-%m-%d %H:%M:%S'), text)
+        w,h= im.size
+        zone= int(h*0.05)
+        logger.debug("Add text. w %4d h %4d zone %4d : %s", w, h, zone, text)
+        im2= ImageOps.expand(im, border=(0,zone,0,0))
+        draw: ImageDraw.ImageDraw= ImageDraw.Draw(im2)
+        #font= ImageFont.truetype('FreeMono.ttf', 24)
+        draw.text((5,5), text, fill=(0,0,0))
+        return im2
+    
     def __init__(self, image_info: ImageInfo, config: CastConfiguration):
         self.image_info= image_info
         self.config= config
         self._ready= False
-        if self.image_info.image_type == ImageType.TENSOR:
-            obj: Tensor= self.image_info.obj
-            dimensions= len(obj.size())
-            logger.info("Dimensions %d", dimensions)
-            if dimensions == 4:
-                logger.warning("%d dimensions, len %s", dimensions, len(obj))
-                obj= obj[0]
-            im: Image.Image= CastingImageInfo._torch_to_pil(obj)
-            self._file= tempfile.NamedTemporaryFile(suffix='.png', prefix='torch_to_pil', dir=self.config.temp_dir, delete=False)
+        try:
+            im: Image.Image= None
+            if self.image_info.image_type == ImageType.TENSOR:
+                prefix='torch_to_pil_'
+                obj: Tensor= self.image_info.obj
+                im= self._tensor_to_pil(obj)
+            elif self.image_info.image_type == ImageType.FILE:
+                prefix='from_file_'
+                im: Image.Image= Image.open(self.image_info.obj)
+            elif self.image_info.image_type == ImageType.PIL:
+                prefix='from_pil_'
+                im: Image.Image= self.image_info.obj
+            elif self.image_info.image_type == ImageType.STABLE_DIFFUSION_PROCESSED:
+                prefix='sd_processed_'
+                obj: Processed= self.image_info.obj
+                im: Image.Image= self._join_images(obj.images)
+            elif self.image_info.image_type == ImageType.STABLE_DIFFUSION_PROCESSING:
+                prefix='sd_processing_'
+                obj: StableDiffusionProcessing= self.image_info.obj
+                im: Image.Image= self._join_images()
+
+            im= self.add_text_to_im(im, image_info.message, image_info.creation_date)
+            self._file= tempfile.NamedTemporaryFile(suffix='.png', prefix=prefix, dir=self.config.temp_dir, delete=False)
             self._path= pathlib.Path(self._file.name)
             im.save(self._path)
-            self.url= "{}{}".format(self.config.base_callback_url, self._file.name)
+            self.url= "{}{}".format(self.config.base_callback_url, self._file.name.replace('\\', '/'))
             self.mime_type= "image/png"
             self._ready= True
-        elif self.image_info.image_type == ImageType.FILE:
-            im: Image.Image= Image.Image()
-            im.load(self.image_info.obj)
-            self._file= tempfile.NamedTemporaryFile(suffix='.png', prefix='torch_to_pil', dir=self.config.temp_dir, delete=False)
-            self._path= pathlib.Path(self._file.name)
-            im.save(self._path)
-            self.url= "{}{}".format(self.config.base_callback_url, self._file.name)
-            self.mime_type= "image/png"
-            self._ready= True
+
+        except Exception as e:
+            logger.exception("Error processing image : %s", str(e))
             
+    def _join_images(self, images: List[Image.Image]):
+        count= len(images)
+
+        if count == 1:
+            return images[0]
+        
+        rows, cols= CastingImageInfo._get_grid_size(len(images))       
+        max_w= 0
+        max_h= 0
+        for i in range(count):
+            w,h= images[i].size
+            max_w= max(max_w, w)
+            max_h= max(max_h, h)
             
+        grid_w= max_w * cols
+        grid_h= max_h * rows
+        grid = Image.new('RGB', size=(grid_w, grid_h))
+
+        im: Image.Image
+        for i, im in enumerate(images):
+            grid.paste(im, box=(i%cols*max_w, i//cols*max_h))
+        return grid
+        
     def _tensor_to_pil(self, obj: Tensor) -> Image.Image:
         dimensions= len(obj.size())
         batch_size= 1
@@ -104,24 +153,14 @@ class CastingImageInfo():
         if dimensions < 4:
             im: Image.Image= CastingImageInfo._torch_to_pil(obj)
             return im
+        
         rows, cols= CastingImageInfo._get_grid_size(batch_size)       
         images: List[Image.Image]= []
-        max_w= 0
-        max_h= 0
         for i in range(batch_size):
             im: Image.Image= CastingImageInfo._torch_to_pil(obj[i])
-            i+= i
             images.append(im)
-            w,h= im.size
-            max_w= max(max_w, w)
-            max_h= max(max_h, h)
-        grid_w= max_w * cols
-        grid_h= max_h * rows
-        grid = Image.new('RGB', size=(grid_w, grid_h))
-        im: Image.Image
-        for i, im in enumerate(images):
-            grid.paste(im, box=(i%cols*max_w, i//cols*max_h))
-        return grid
+            
+        return self._join_images(images=images)
     
     def is_ready(self) -> bool:
         return self._ready and self._path.is_file()
@@ -140,6 +179,8 @@ class CastThread(Thread):
     
     def run(self):
         logger.info("Start Cast Thread")
+        last_sent= None
+        min_wait= 10
         if self.config.cast_type != CastType.CHROMECAST:
             logger.critical("Cast type %s not supported.", self.config.cast_type.value)
             return
@@ -165,9 +206,13 @@ class CastThread(Thread):
                 self._chromecast.wait(timeout=5)
                 casting_image= CastingImageInfo(image_info=img_info, config=self.config)
                 if casting_image.is_ready():
+                    if last_sent is not None:
+                        while (datetime.now() - last_sent).total_seconds() < min_wait:
+                            logging.debug("Wait, not %d seconds since last play", min_wait)
+                            time.sleep(1)
                     logger.info("Casting %s", casting_image.url)
                     self._chromecast.play_media(url=casting_image.url, content_type=casting_image.mime_type)
-                    
+                    last_sent= datetime.now()
                 
                 
 # my_cast: pychromecast.Chromecast= chromecasts[0] if len(chromecasts) > 0 else None                    
@@ -177,6 +222,59 @@ class CastThread(Thread):
                 logger.exception("Error processing image")
         logger.warning("Cast thread ended, stop event received")
 
+class PyChromeCastScript(scripts.Script):
+    # Extension title in menu UI
+    def title(self):
+            return "Casting"
+    def title(self):
+            return "Casting"
+    def show(self, is_img2img):
+        return scripts.AlwaysVisible
+
+    def ui(self, is_img2img):
+        check_box_cast = gr.inputs.Checkbox(label="Cast", default=True)        
+        return [check_box_cast] 
+               
+    def postprocess_image(self, p: StableDiffusionProcessing, pp: scripts.PostprocessImageArgs, *args):
+        """
+        Called for every image after it has been generated.
+        """
+        logger.warning("postprocess_image")
+        logger.info("p: (%s) %r", type(p), p)
+        logger.info("pp: (%s) %r", type(pp), pp)
+        logger.info("args: %r", args)
+        if issubclass(type(pp), Processed):
+            logger.info("postprocess_image: Processed")
+            info= ImageInfo(ImageType.STABLE_DIFFUSION_PROCESSED, obj= pp, creation_date=datetime.now(), message= None)
+            self._enqueue(info)
+        if issubclass(type(pp), scripts.PostprocessImageArgs):
+            logger.info("postprocess_image: PostprocessImageArgs")
+            logger.info("pp.image : %s", type(pp.image))
+            info= ImageInfo(ImageType.PIL, obj= pp.image, creation_date=datetime.now(), message= "PostprocessImageArgs {}/{}".format(p.iteration, p.batch_size))
+            self._enqueue(info)
+        elif issubclass(type(p), StableDiffusionProcessing):
+            logger.info("postprocess_image: StableDiffusionProcessing")
+            info= ImageInfo(ImageType.STABLE_DIFFUSION_PROCESSING, obj= pp, creation_date=datetime.now(), message= None)            
+            self._enqueue(info)
+        else:
+            logger.warning("PP: Unsuported type %s", type(pp))
+            
+
+    def _enqueue(self, img_info: ImageInfo):
+        if image_queue is None:
+            logger.error("Queue object not found, discarding object")
+            return
+        if image_queue.full():
+            logger.warning("Queue was full, dropping one object")
+            try:
+                image_queue.get_nowait()
+            except Empty:
+                pass
+        try:
+            image_queue.put_nowait(img_info)
+        except Full:
+            logger.warning("Error queueing image, queue full")            
+        
     
 image_queue: Optional[Queue[ImageInfo]]= None
 cast_thread: Optional[CastThread]= None
@@ -269,39 +367,41 @@ base_url= "http://{}:{}/file=".format(default_listen_ip, listen_port)
 
 
 def on_save_action(params: ImageSaveParams):
-    logger.info("PUSH IMG")
-    logger.info("Filename: %s", params.filename)
-    logger.info("Pnginfo : %r", params.pnginfo)
-    logger.info("p (%s) : %r", type(params.p), params.p)
-    info= ImageInfo(ImageType.FILE, obj= params.filename, creation_date=datetime.now(), message= None)
+    pass
+    # logger.info("PUSH IMG")
+    # logger.info("Filename: %s", params.filename)
+    # logger.info("Pnginfo : %r", params.pnginfo)
+    # logger.info("p (%s) : %r", type(params.p), params.p)
+    # info= ImageInfo(ImageType.FILE, obj= params.filename, creation_date=datetime.now(), message= None)
 
-    if image_queue.full():
-        try:
-            image_queue.get_nowait()
-        except Empty:
-            pass
-    try:
-        image_queue.put_nowait(info)
-    except Full:
-        logger.warning("Error queueing image, queue full")
+    # if image_queue.full():
+    #     try:
+    #         image_queue.get_nowait()
+    #     except Empty:
+    #         pass
+    # try:
+    #     image_queue.put_nowait(info)
+    # except Full:
+    #     logger.warning("Error queueing image, queue full")
         
 def cfg_action(params: AfterCFGCallbackParams):
-    logger.info("CFG_ACTION")
-    loop= "{}/{}".format(params.sampling_step, params.total_sampling_steps)
-    text= "cfg: {}".format(loop)
-    if params.sampling_step == params.total_sampling_steps:
-        text= "cfg: Completed {}".format(params.total_sampling_steps)
+    pass
+    #logger.info("CFG_ACTION")
+    # loop= "{}/{}".format(params.sampling_step, params.total_sampling_steps)
+    # text= "cfg: {}".format(loop)
+    # if params.sampling_step == params.total_sampling_steps:
+    #     text= "cfg: Completed {}".format(params.total_sampling_steps)
 
-    info= ImageInfo(ImageType.TENSOR, obj= params.x, creation_date=datetime.now(), message=text)
-    if image_queue.full():
-        try:
-            image_queue.get_nowait()
-        except Empty:
-            pass
-    try:
-        image_queue.put_nowait(info)
-    except Full:
-        logger.warning("Error queueing image, queue full")
+    # info= ImageInfo(ImageType.TENSOR, obj= params.x, creation_date=datetime.now(), message=text)
+    # if image_queue.full():
+    #     try:
+    #         image_queue.get_nowait()
+    #     except Empty:
+    #         pass
+    # try:
+    #     image_queue.put_nowait(info)
+    # except Full:
+    #     logger.warning("Error queueing image, queue full")
 
 def teardown():
     global cast_thread, cast_thread_stop_event
