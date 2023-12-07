@@ -156,12 +156,13 @@ class CastingImageInfo():
 
         wrapper: TextWrapper= TextWrapper()
         font_size= int(h*0.03)
+        logger.info("Selected font: %s", selected_font)
         try:
             font: FreeTypeFont= ImageFont.truetype(selected_font, size=font_size)
             font_w= font.getlength("_")
         except Exception as e:
-            logger.warning("Error loading TTF font, fallback to default.")
-            font: ImageFont= ImageFont.load_default(size=font_size)
+            logger.exception("Error loading TTF font, fallback to default : %s", str(e))
+            font: ImageFont= ImageFont.load_default()
             # Approximation
             font_w= int(font_size * 0.4)
         logger.debug("SIZE %20s w %5d h %5d", "font", font_w, font_size)
@@ -193,8 +194,6 @@ class CastingImageInfo():
         im2= ImageOps.expand(im, border=(lr_borders, 0, lr_borders, b_border))
         draw: ImageDrawPIL= ImageDraw.Draw(im2)
 
-        #font= ImageFont.truetype('FreeMono.ttf', 24)
-        font= ImageFont.load_default(size=font_size)
         y= h + 2
         draw.rectangle([
             (2, y), 
@@ -373,6 +372,7 @@ else:
             break
     else:
         selected_font= all_fonts[0]
+selected_font= font_manager.findfont(selected_font)
     
 image_queue: Optional[Queue[ImageInfo]]= None
 cast_thread: Optional[CastThread]= None
