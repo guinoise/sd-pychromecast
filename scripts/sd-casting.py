@@ -304,6 +304,7 @@ class CastThread(Thread):
     
     def __init__(self, stop_event: Event, image_queue: Queue, config: CastConfiguration):
         Thread.__init__(self)
+        logger.info("Init Cast Thread Config: %r", config)
         self.stop_event= stop_event
         self.queue= image_queue
         self.config= config
@@ -331,6 +332,7 @@ class CastThread(Thread):
                                 logger.debug("Found device")
                                 self._chromecast= obj
                                 gr.Info(f"Connecting to {self.config.device_name}")
+                                #Info App CC1AD845
                                 break
                         else:
                             logger.warning("ChromeCast %s is unreachable, dropping image")
@@ -406,8 +408,8 @@ class CastingScript(scripts.Script):
          """
         logger.debug("CastingScript%25s", inspect.stack()[0][3])
         logger.debug("Args %20s (%s) %r", "is_img2img", type(is_img2img), is_img2img)
-        #return scripts.AlwaysVisible
-        return False
+        return scripts.AlwaysVisible
+        #return False
     
     # def run(self, p, *args):
     #     """
@@ -558,6 +560,7 @@ class CastingScript(scripts.Script):
         """
         logger.debug("CastingScript%25s", inspect.stack()[0][3])
         if not casting:
+            logger.error("NOT CASTING")
             return
         logger.debug("Args %20s (%s) %r", "p", type(p), p)
         logger.debug("Args %20s (%s) %r", "pp", type(pp), pp)
@@ -641,6 +644,7 @@ class CastingScript(scripts.Script):
 logger.info("Importing module, defining variable")
 selected_font= None
 casting: bool= False
+initial_scan_done= False
 cast_devices= []
 image_queue: Optional[Queue[ImageInfo]]= None
 cast_thread: Optional[CastThread]= None
@@ -666,7 +670,7 @@ def refresh_cast_devices():
     cast_devices.extend(chromecast_devices)         
 
 def cast_setting_change(*args, **kwargs):
-    global image_queue, cast_thread, cast_thread_stop_event
+    global image_queue, cast_thread, cast_thread_stop_event, cast_devices, casting
     logger.debug("CastingScript%25s", inspect.stack()[0][3])
     logger.debug("Args %20s %r", "args", args)
     logger.debug("Args %20s %r", "kwargs", kwargs)
@@ -674,12 +678,14 @@ def cast_setting_change(*args, **kwargs):
     casting= (getattr(shared.opts, "casting", False) 
               and device_name is not None
               and device_name in cast_devices)
-    logger.debug("Cast setting change. Casting option %5s Casting %5s device_name : %s", getattr(shared.opts, "casting", None), casting, device_name)
+    logger.debug("Cast setting change. Casting option %5s Casting %5s device_name : %s devices: %s", getattr(shared.opts, "casting", None), casting, device_name, cast_devices)
     if casting and device_name and cast_thread is None:
         logger.warning("Starting casting thread")
         config= CastConfiguration(cast_type=CastType.CHROMECAST, device_name=device_name, base_callback_url=base_url, temp_dir=temp_dir)
         #Just to be sure
         cast_thread_stop_event.clear()
+        if image_queue is None:
+            image_queue= Queue(maxsize=10)        
         cast_thread= CastThread(stop_event=cast_thread_stop_event, image_queue=image_queue, config=config)
         cast_thread.start()
     elif cast_thread is not None:
@@ -688,7 +694,10 @@ def cast_setting_change(*args, **kwargs):
         cast_thread_stop_event.set()
         logger.info("Wait for cast thread to teard down, max 5 seconds")
         cast_thread.join(timeout=5)
-        cast_thread= None        
+        cast_thread= None
+    if getattr(shared.opts, "casting", False) and cast_thread is None:
+        shared.opts.set("casting", False, run_callbacks=False)       
+        gr.Error(f"Device {device_name} is not discovered")
 
 
 
@@ -781,7 +790,7 @@ def on_script_unloaded():
         cast_thread= None
 
 def on_app_started(block: gr.Blocks, app):
-    global image_queue, cast_thread, cast_thread_stop_event
+    global cast_thread, cast_thread_stop_event, initial_scan_done, base_url, casting, selected_font
     logger.info("App started (module)")
     logger.info("Data path: %s", shared.data_path)
     casting= getattr(shared.opts, "casting", False)
@@ -822,12 +831,13 @@ def on_app_started(block: gr.Blocks, app):
     logger.debug("Default listen IP : %s", default_listen_ip)
     base_url= "http://{}:{}/file=".format(default_listen_ip, port)
 
-    if image_queue is None:
-        image_queue= Queue(maxsize=10)
-
     if casting and cast_thread is None:
         logger.debug("Casting was enabled but just restarting, disable it")
-        shared.opts.set("casting", False, run_callbacks=False)        
+        shared.opts.set("casting", False, run_callbacks=False) 
+    if not initial_scan_done:
+        logger.info("Initial scanning of devices")               
+        refresh_cast_devices()
+        initial_scan_done= True
 
 
 def on_before_ui():
