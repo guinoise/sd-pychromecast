@@ -315,10 +315,12 @@ class PyChromeCastScript(scripts.Script):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
-        check_box_cast = gr.inputs.Checkbox(label="Cast", default=True)        
+        check_box_cast = gr.Checkbox(label="Cast", default=True)        
         return [check_box_cast] 
                
-    def postprocess_image(self, p: StableDiffusionProcessing, pp: scripts.PostprocessImageArgs, *args):
+    def postprocess_image(self, p: StableDiffusionProcessing, pp: scripts.PostprocessImageArgs, check_box_cast, *args):
+        if not check_box_cast:
+            return
         """
         Called for every image after it has been generated.
         """
@@ -393,11 +395,24 @@ fh.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 fh.setFormatter(formatter)
 logger= logging.getLogger(__name__)
-if cmd_opts.loglevel is not None:
-    logger.setLevel(cmd_opts.loglevel)
+logger.addHandler(fh)
+
+if cmd_opts.loglevel:
+    if cmd_opts.loglevel.upper() == "DEBUG":
+        logger.setLevel(logging.DEBUG)
+    elif cmd_opts.loglevel.upper() == "INFO":
+        logger.setLevel(logging.INFO)
+    elif cmd_opts.loglevel.upper() in ["WARN", "WARNING"]:
+        logger.setLevel(logging.WARNING)
+    elif cmd_opts.loglevel.upper() == "ERROR":
+        logger.setLevel(logging.ERROR)
+    elif cmd_opts.loglevel.upper() == "CRITICAL":
+        logger.setLevel(logging.CRITICAL)
+    else:
+        logger.setLevel(logging.INFO)    
+        logger.critical("ERROR SETTING Debug level, value %r could not be parsed, defaulting to INFO", cmd_opts.loglevel)
 else:
     logger.setLevel(logging.DEBUG)
-logger.addHandler(fh)
 
 logger.info("INIT")
 
