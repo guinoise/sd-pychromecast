@@ -358,11 +358,13 @@ class CastThread(Thread):
                 #logger.debug("Empty queue. State (%s) : (%r)", type(shared.state), shared.state)
                 if (getattr(shared.opts, "cast_live_preview", False) == True):
                     state: State= shared.state
-                    if ((current_job != state.job or state.id_live_preview != last_id_live_preview)
+                    if (state.job != "" 
+                        and (current_job != state.job or state.id_live_preview != last_id_live_preview)
                         and state.current_image is not None):
                         logger.debug("Casting a preview")
                         start_time= datetime.fromtimestamp(state.time_start)
                         messages=[f"Preview {state.id_live_preview}", f"Job : {state.job}"]
+                        logger.debug(messages)
                         info= ImageInfo(ImageType.PIL, obj= state.current_image, creation_date=start_time, message= messages)
                         current_job= state.job
                         last_id_live_preview= state.id_live_preview
