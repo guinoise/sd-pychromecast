@@ -6,6 +6,7 @@ import pychromecast
 import time
 from datetime import datetime
 from modules import script_callbacks, shared, scripts, ui_components
+from modules.shared_state import State
 from modules.script_callbacks import ImageSaveParams, AfterCFGCallbackParams, ImageGridLoopParams
 import logging
 from modules.processing import StableDiffusionProcessingTxt2Img, StableDiffusionProcessing, Processed
@@ -108,7 +109,7 @@ class ImageInfo:
     image_type: ImageType
     obj: any
     creation_date: datetime
-    message: Optional[str]
+    message: Union[str, List[str], None]
 
 # End Datatypes
 
@@ -312,7 +313,9 @@ class CastThread(Thread):
     def run(self):
         logger.info("Start Cast Thread")
         last_sent= None
-        min_wait= 10
+        min_wait= 2
+        last_id_live_preview: int= -1
+        current_job: str= ""
         if self.config.cast_type != CastType.CHROMECAST:
             logger.critical("Cast type %s not supported.", self.config.cast_type.value)
             return
@@ -349,7 +352,21 @@ class CastThread(Thread):
                     self._chromecast.play_media(url=casting_image.url, content_type=casting_image.mime_type)
                     last_sent= datetime.now()                
             except Empty as e:
-                pass
+                # Empty queue, check if live preview availabe
+                #shared.state.id_live_preview != req.id_live_preview
+                #shared.state.set_current_image()
+                #logger.debug("Empty queue. State (%s) : (%r)", type(shared.state), shared.state)
+                if (getattr(shared.opts, "cast_live_preview", False) == True):
+                    state: State= shared.state
+                    if ((current_job != state.job or state.id_live_preview != last_id_live_preview)
+                        and state.current_image is not None):
+                        logger.debug("Casting a preview")
+                        start_time= datetime.fromtimestamp(state.time_start)
+                        messages=[f"Preview {state.id_live_preview}", f"Job : {state.job}"]
+                        info= ImageInfo(ImageType.PIL, obj= state.current_image, creation_date=start_time, message= messages)
+                        current_job= state.job
+                        last_id_live_preview= state.id_live_preview
+                        self.queue.put_nowait(info)
             except Exception as e:
                 gr.Warning('Error casting image')
                 logger.exception("Error processing image")
@@ -554,7 +571,7 @@ class CastingScript(scripts.Script):
 
     #     pass
 
-    def postprocess_image(self, p, pp: scripts.PostprocessImageArgs, *args):
+    def postprocess_image(self, p: StableDiffusionProcessing, pp: scripts.PostprocessImageArgs, *args):
         """
         Called for every image after it has been generated.
         """
@@ -571,8 +588,12 @@ class CastingScript(scripts.Script):
             self._enqueue(info)
         if issubclass(type(pp), scripts.PostprocessImageArgs):
             logger.info("postprocess_image: PostprocessImageArgs")
-            logger.info("pp.image : %s", type(pp.image))
-            info= ImageInfo(ImageType.PIL, obj= pp.image, creation_date=datetime.now(), message= "PostprocessImageArgs {}/{}".format(p.iteration, p.batch_size))
+            logger.info("p :(%s) %s", type(p), p)
+            messages=[]
+            messages.append(f"PostprocessImageArgs {p.n_iter}/{p.batch_size}")
+            messages.append(f"seed {p.seed}")
+            #messages.append(f"eta {p.eta}")
+            info= ImageInfo(ImageType.PIL, obj= pp.image, creation_date=datetime.now(), message= messages)
             self._enqueue(info)
         elif issubclass(type(p), StableDiffusionProcessing):
             logger.info("postprocess_image: StableDiffusionProcessing")
@@ -778,6 +799,16 @@ Limited to unprivileged port between 1024 and 32000
             onchange=cast_setting_change,
         ),
     )
+    shared.opts.add_option(
+        "cast_live_preview",
+        shared.OptionInfo(
+            False,
+            "Cast live preview while idle",
+            gr.Checkbox,
+            {"interactive": True, "visible": True},
+            section=section,
+        ),
+    )    
 
 def on_script_unloaded():
     global cast_thread, cast_thread_stop_event
