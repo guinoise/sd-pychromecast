@@ -593,7 +593,7 @@ class CastingScript(scripts.Script):
             logger.info("p :(%s) %s", type(p), p)
             messages=[]
             messages.append(f"PostprocessImageArgs {p.n_iter}/{p.batch_size}")
-            messages.append(f"seed {p.seeds[p.n_iter]}")
+            messages.append(f"seed {p.seeds[p.iteration]}")
             #messages.append(f"eta {p.eta}")
             info= ImageInfo(ImageType.PIL, obj= pp.image, creation_date=datetime.now(), message= messages)
             self._enqueue(info)
